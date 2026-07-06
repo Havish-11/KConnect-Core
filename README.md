@@ -29,6 +29,13 @@
  *
  * The -q flag suppresses bpftrace's normal "Attaching N probes..." banner
  * so only clean data lines hit the pipe.
+ *
+ * Note: AF_INET / AF_INET6 are not builtin identifiers on every bpftrace
+ * version, so we use the raw numeric family values instead:
+ *   2  = AF_INET
+ *   10 = AF_INET6
+ * ntop() infers v4 vs v6 from the byte width of the value passed in, so
+ * no explicit family argument is needed there.
  */
 
 /* ---------------- TCP IPv4 ---------------- */
@@ -44,7 +51,7 @@ kretprobe:tcp_v4_connect
 /@sock4[tid] && retval == 0/
 {
     $sk    = (struct sock *)@sock4[tid];
-    $daddr = ntop(AF_INET, $sk->__sk_common.skc_daddr);
+    $daddr = ntop($sk->__sk_common.skc_daddr);
     $dport = $sk->__sk_common.skc_dport;
     $dport = ($dport >> 8) | (($dport << 8) & 0xff00);   // network -> host byte order
     $sport = $sk->__sk_common.skc_num;
@@ -68,7 +75,7 @@ kretprobe:tcp_v6_connect
 /@sock6[tid] && retval == 0/
 {
     $sk    = (struct sock *)@sock6[tid];
-    $daddr = ntop(AF_INET6, $sk->__sk_common.skc_v6_daddr.in6_u.u6_addr8);
+    $daddr = ntop($sk->__sk_common.skc_v6_daddr.in6_u.u6_addr8);
     $dport = $sk->__sk_common.skc_dport;
     $dport = ($dport >> 8) | (($dport << 8) & 0xff00);
     $sport = $sk->__sk_common.skc_num;
@@ -87,15 +94,17 @@ kprobe:udp_sendmsg
 {
     $sk = (struct sock *)arg0;
 
-    if ($sk->__sk_common.skc_family == AF_INET) {
-        $daddr = ntop(AF_INET, $sk->__sk_common.skc_daddr);
-        $dport = $sk->__sk_common.skc_dport;
-        $dport = ($dport >> 8) | (($dport << 8) & 0xff00);
-        $sport = $sk->__sk_common.skc_num;
+    if ($sk->__sk_common.skc_family == 2) {          // AF_INET
+        $raw_daddr = $sk->__sk_common.skc_daddr;
+        $dport     = $sk->__sk_common.skc_dport;
+        $dport     = ($dport >> 8) | (($dport << 8) & 0xff00);
+        $sport     = $sk->__sk_common.skc_num;
 
         // skc_daddr/skc_dport are only populated for "connected" UDP
-        // sockets; skip unconnected sendto()s with no fixed destination.
-        if ($dport > 0 && $daddr != "0.0.0.0") {
+        // sockets; skip unconnected sendto()s with no fixed destination
+        // (raw daddr of 0 means unset).
+        if ($dport > 0 && $raw_daddr != 0) {
+            $daddr = ntop($raw_daddr);
             printf("%d|%s|%s|%s|%d|%d\n", pid, comm, "UDP", $daddr, $dport, $sport);
         }
     }
