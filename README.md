@@ -14,55 +14,97 @@
   
 #### Best of Luck !!!!
 
-
-
 #!/usr/bin/env bpftrace
+/*
+ * kconnect_trace.bt
+ *
+ * Traces outbound TCP (v4/v6) connects and UDP sends and emits one
+ * pipe-delimited line per event on stdout, in the exact format expected
+ * by the KConnect Core C display program:
+ *
+ *      pid|comm|proto|daddr|dport|sport
+ *
+ * Usage:
+ *      sudo bpftrace -q kconnect_trace.bt | ./kconnect_core
+ *
+ * The -q flag suppresses bpftrace's normal "Attaching N probes..." banner
+ * so only clean data lines hit the pipe.
+ */
 
-#include <net/sock.h>
-#include <linux/socket.h>
-#include <linux/in.h>
-#include <linux/in6.h>
+/* ---------------- TCP IPv4 ---------------- */
 
-BEGIN
-{
-    printf("# PID|COMM|PROTO|DEST_IP|DEST_PORT|SRC_PORT\n");
-}
-
-/* TCP IPv4 connections */
 kprobe:tcp_v4_connect
 {
-    $sk = (struct sock *)arg0;
-
-    printf("%d|%s|TCP|%s|%d|%d\n",
-        pid,
-        comm,
-        ntop(AF_INET, $sk->__sk_common.skc_daddr),
-        ntohs($sk->__sk_common.skc_dport),
-        ntohs($sk->__sk_common.skc_num));
+    // arg0 of tcp_v4_connect(struct sock *sk, ...) is the sock pointer.
+    // Stash it per-thread so the kretprobe can recover it on return.
+    @sock4[tid] = arg0;
 }
 
-/* UDP IPv4 send */
+kretprobe:tcp_v4_connect
+/@sock4[tid] && retval == 0/
+{
+    $sk    = (struct sock *)@sock4[tid];
+    $daddr = ntop(AF_INET, $sk->__sk_common.skc_daddr);
+    $dport = $sk->__sk_common.skc_dport;
+    $dport = ($dport >> 8) | (($dport << 8) & 0xff00);   // network -> host byte order
+    $sport = $sk->__sk_common.skc_num;
+
+    printf("%d|%s|%s|%s|%d|%d\n", pid, comm, "TCP", $daddr, $dport, $sport);
+}
+
+kretprobe:tcp_v4_connect
+{
+    delete(@sock4[tid]);
+}
+
+/* ---------------- TCP IPv6 ---------------- */
+
+kprobe:tcp_v6_connect
+{
+    @sock6[tid] = arg0;
+}
+
+kretprobe:tcp_v6_connect
+/@sock6[tid] && retval == 0/
+{
+    $sk    = (struct sock *)@sock6[tid];
+    $daddr = ntop(AF_INET6, $sk->__sk_common.skc_v6_daddr.in6_u.u6_addr8);
+    $dport = $sk->__sk_common.skc_dport;
+    $dport = ($dport >> 8) | (($dport << 8) & 0xff00);
+    $sport = $sk->__sk_common.skc_num;
+
+    printf("%d|%s|%s|%s|%d|%d\n", pid, comm, "TCP", $daddr, $dport, $sport);
+}
+
+kretprobe:tcp_v6_connect
+{
+    delete(@sock6[tid]);
+}
+
+/* ---------------- UDP (v4) ---------------- */
+
 kprobe:udp_sendmsg
 {
     $sk = (struct sock *)arg0;
 
-    printf("%d|%s|UDP|%s|%d|%d\n",
-        pid,
-        comm,
-        ntop(AF_INET, $sk->__sk_common.skc_daddr),
-        ntohs($sk->__sk_common.skc_dport),
-        ntohs($sk->__sk_common.skc_num));
+    if ($sk->__sk_common.skc_family == AF_INET) {
+        $daddr = ntop(AF_INET, $sk->__sk_common.skc_daddr);
+        $dport = $sk->__sk_common.skc_dport;
+        $dport = ($dport >> 8) | (($dport << 8) & 0xff00);
+        $sport = $sk->__sk_common.skc_num;
+
+        // skc_daddr/skc_dport are only populated for "connected" UDP
+        // sockets; skip unconnected sendto()s with no fixed destination.
+        if ($dport > 0 && $daddr != "0.0.0.0") {
+            printf("%d|%s|%s|%s|%d|%d\n", pid, comm, "UDP", $daddr, $dport, $sport);
+        }
+    }
 }
 
-/* TCP IPv6 */
-kprobe:tcp_v6_connect
-{
-    $sk = (struct sock *)arg0;
+/* ---------------- cleanup ---------------- */
 
-    printf("%d|%s|TCP|%s|%d|%d\n",
-        pid,
-        comm,
-        ntop(AF_INET6, $sk->__sk_common.skc_v6_daddr.in6_u.u6_addr8),
-        ntohs($sk->__sk_common.skc_dport),
-        ntohs($sk->__sk_common.skc_num));
+END
+{
+    clear(@sock4);
+    clear(@sock6);
 }
