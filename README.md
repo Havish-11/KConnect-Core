@@ -117,3 +117,29 @@ END
     clear(@sock4);
     clear(@sock6);
 }
+
+
+
+
+
+
+## New CODE
+
+#!/usr/bin/env bpftrace
+
+tracepoint:sock:inet_sock_set_state
+{
+    // 1 corresponds to TCP_ESTABLISHED, using the correct kernel field: newstate
+    if (args->newstate == 1) {
+        $daddr = ntop(args->family, args->daddr);
+
+        // Output format matched precisely to your C parser: pid|comm|proto|daddr|dport|sport
+        printf("%d|%s|TCP|%s|%d|%d\n",
+            pid,
+            comm,
+            $daddr,
+            args->dport,
+            args->sport
+        );
+    }
+}
